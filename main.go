@@ -1,6 +1,7 @@
 package main
 
 import (
+	"abc"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -35,15 +36,19 @@ func main() {
 //Runs a non trivial task and returns the time it finished
 func nonTrivialTast(r *http.Request) int64 {
 	md5Channel := make(chan [16]byte, 1)
-	networkChanel := make(chan string, 1)
-	readFilesChannel := make(chan string, 1)
+	//networkChanel := make(chan string, 1)
+	readFilesChannel := make(chan string, 6)
 
-	go readContents("./files", readFilesChannel)
+	readContents("./files", readFilesChannel)
+	readContents("./files", readFilesChannel)
+	readContents("./files", readFilesChannel)
+	//simulateNetworkConnection(networkChanel)
 	fileMd5(fmt.Sprint(r), md5Channel)
-	simulateNetworkConnection(networkChanel)
 
 	<-md5Channel
-	<-networkChanel
+	//<-networkChanel
+	<-readFilesChannel
+	<-readFilesChannel
 	<-readFilesChannel
 
 	return (time.Now().UnixNano())
