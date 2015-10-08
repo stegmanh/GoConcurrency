@@ -109,10 +109,19 @@ func nonTrivialTast(r *http.Request) int64 {
 	}
 	//End Prime
 
-	<-bcryptChannel
-	<-networkChannel
-	<-readFilesChannel
-	<-primeNumberChannel
+	//End the channel
+	for i = 0; i < goConfig.BcryptRuns; i++ {
+		<-bcryptChannel
+	}
+	for i = 0; i < goConfig.NetworkRuns; i++ {
+		<-networkChannel
+	}
+	for i = 0; i < goConfig.NetworkRuns; i++ {
+		<-readFilesChannel
+	}
+	for i = 0; i < goConfig.PrimeRuns; i++ {
+		<-primeNumberChannel
+	}
 
 	return (time.Now().UnixNano())
 }
@@ -148,14 +157,18 @@ func readContents(dir string, back chan string) {
 func isPrime(num int, back chan bool) {
 	if num <= 1 {
 		back <- true
+		return
 	}
 	if num%2 == 0 {
 		back <- false
+		return
 	}
 	for i := 3; i < num/2; i = i + 2 {
 		if num%i == 0 {
 			back <- false
+			return
 		}
 	}
 	back <- true
+	return
 }
