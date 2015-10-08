@@ -1,0 +1,10 @@
+{
+  "bcryptRuns" : 1,
+  "bcryptGoRoutines": 0,
+  "networkRuns" : 1,
+  "networkGoRoutines" : 0,
+  "fileReadRuns" : 1,
+  "fileGoRoutines" : 0,
+  "primeRuns" : 1,
+  "primeGoRoutines" : 0
+}
