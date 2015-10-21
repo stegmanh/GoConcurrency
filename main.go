@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"time"
 )
@@ -45,6 +47,10 @@ func main() {
 	}
 	//End init
 
+	//TCP server
+	go startAndRunTCPServer()
+	//End TCP server func
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		requestRecieved := time.Now().UnixNano()
 		responseSent := nonTrivialTast(r)
@@ -56,6 +62,49 @@ func main() {
 	})
 	fmt.Println("Starting server..")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+//Starts a TCP server listening on port 8000
+//We listen for requests with ln.Accept and when we get one, we handleTCPConn in another goroutine
+func startAndRunTCPServer() {
+	conns := make([]net.Conn, 0, 100)
+	ln, err := net.Listen("tcp", ":8000")
+	if err != nil {
+		fmt.Println(err)
+	}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Println("Error accepting the connection ", err)
+			continue
+		}
+		broadCast("A new client has connected", conns)
+		conns = append(conns, conn)
+		go handleTCPConn(conn)
+	}
+}
+
+//Creates a reader form the conection
+//Reads new string with ReadString delimited with '\n'.
+//	If there is an error (EOF when client DC) we close the connection and return out of the goroutine
+func handleTCPConn(conn net.Conn) {
+	reader := bufio.NewReader(conn)
+	for {
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			fmt.Println("Client has closed the connection ", conn.RemoteAddr())
+			return
+		}
+		message = "We recieved message " + message + "\n"
+		conn.Write([]byte(message))
+	}
+}
+
+func broadCast(message string, conns []net.Conn) {
+	for _, conn := range conns {
+		fmt.Fprintf(conn, message+"\n")
+	}
 }
 
 //Runs a non trivial task and returns the time it finished
@@ -70,42 +119,42 @@ func nonTrivialTast(r *http.Request) int64 {
 	var i int
 	//Bcrypt
 	for i = goConfig.BcryptRuns - goConfig.BcryptGoRoutines; i < goConfig.BcryptRuns; i++ {
-		fmt.Println("Running Bcrypt Go")
+		//fmt.Println("Running Bcrypt Go")
 		go fileBcrypt("./files/story.txt", bcryptChannel)
 	}
 	for i = goConfig.BcryptRuns - goConfig.BcryptGoRoutines; i > 0; i-- {
-		fmt.Println("Running Bcrypt Not-Go")
+		//fmt.Println("Running Bcrypt Not-Go")
 		fileBcrypt("./files/story.txt", bcryptChannel)
 	}
 	//End Bcrypt
 	//Start files
 	for i = goConfig.FileReadRuns - goConfig.FileGoRoutines; i < goConfig.FileReadRuns; i++ {
-		fmt.Println("Running File Go")
+		//fmt.Println("Running File Go")
 		go readContents("./files", readFilesChannel)
 	}
 	for i = goConfig.FileReadRuns - goConfig.FileGoRoutines; i > 0; i-- {
-		fmt.Println("Running File Not-Go")
+		//fmt.Println("Running File Not-Go")
 		readContents("./files", readFilesChannel)
 	}
 	//End files
 	//Start network
 	for i = goConfig.NetworkRuns - goConfig.NetworkGoRoutines; i < goConfig.NetworkRuns; i++ {
-		fmt.Println("Running Network Go")
+		//fmt.Println("Running Network Go")
 		go simulateNetworkConnection(networkChannel)
 	}
 	for i = goConfig.NetworkRuns - goConfig.NetworkGoRoutines; i > 0; i-- {
-		fmt.Println("Running Network Not-Go")
+		//fmt.Println("Running Network Not-Go")
 		simulateNetworkConnection(networkChannel)
 	}
 	//End network
-	//Start Prime
+	//Start Prime //Ad 47 to end of numbers to make SUPER slow
 	for i = goConfig.PrimeRuns - goConfig.PrimeGoRoutines; i < goConfig.PrimeRuns; i++ {
-		fmt.Println("Running Prime Go")
-		go isPrime(2147483647, primeNumberChannel)
+		//fmt.Println("Running Prime Go")
+		go isPrime(21474836, primeNumberChannel)
 	}
 	for i = goConfig.PrimeRuns - goConfig.PrimeGoRoutines; i > 0; i-- {
-		fmt.Println("Running Prime Not-Go")
-		isPrime(2147483647, primeNumberChannel)
+		//fmt.Println("Running Prime Not-Go")
+		isPrime(21474836, primeNumberChannel)
 	}
 	//End Prime
 
@@ -129,7 +178,7 @@ func nonTrivialTast(r *http.Request) int64 {
 //Calculates the Md5 of string s and responds with it back on the back channel
 func fileBcrypt(fileName string, back chan []byte) {
 	file, _ := ioutil.ReadFile(fileName)
-	hash, _ := bcrypt.GenerateFromPassword(file, 10)
+	hash, _ := bcrypt.GenerateFromPassword(file, 5)
 	back <- hash
 }
 
