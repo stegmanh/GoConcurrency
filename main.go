@@ -2,6 +2,11 @@ package main
 
 import (
 	"bufio"
+	"crypto/md5"
+	cRand "crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
@@ -10,6 +15,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	//"strings"
 	"time"
 )
 
@@ -32,8 +38,19 @@ type config struct {
 	PrimeGoRoutines   int
 }
 
+type clientTCPConnection struct {
+	conn          net.Conn
+	messageCount  int
+	authenticated bool
+	started       bool
+}
+
+var privateKey *rsa.PrivateKey
+var publicKeyPKIX []byte
+
 //Globals
 var goConfig config
+var finishChannel chan int
 
 func main() {
 	//Load the config file, panics if something goes wrong
@@ -46,6 +63,11 @@ func main() {
 		panic(err)
 	}
 	//End init
+
+	privateKey, publicKeyPKIX, err = generateRSAInformation()
+	if err != nil {
+		panic(err)
+	}
 
 	//TCP server
 	go startAndRunTCPServer()
@@ -67,44 +89,133 @@ func main() {
 //Starts a TCP server listening on port 8000
 //We listen for requests with ln.Accept and when we get one, we handleTCPConn in another goroutine
 func startAndRunTCPServer() {
-	conns := make([]net.Conn, 0, 100)
+	clients := make(map[string]net.Conn)
 	ln, err := net.Listen("tcp", ":8000")
 	if err != nil {
 		fmt.Println(err)
 	}
+	//This function will call an anon function after 30 seconds that broadcasts "start"
+	//Start is the signal to the clients to start the server
+	time.AfterFunc(time.Second*30, func() {
+		fmt.Printf("Requesting %d clients to start\n", len(clients))
+		currentConns := make(map[string]net.Conn)
+		for k, v := range clients {
+			currentConns[k] = v
+		}
+		handleStartedClients(currentConns)
+	})
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			fmt.Println("Error accepting the connection ", err)
 			continue
 		}
-		broadCast("A new client has connected", conns)
-		conns = append(conns, conn)
-		go handleTCPConn(conn)
+		clients[conn.RemoteAddr().String()] = conn
+		go handleTCPConn(conn, clients)
 	}
+}
+
+func handleStartedClients(conns map[string]net.Conn) {
+	finishChannel = make(chan int, len(conns))
+	broadCast("start\n", conns)
+	var numberOfFinishedClients int
+	for numberOfFinishedClients < len(conns) {
+		numberOfFinishedClients += <-finishChannel
+	}
+	fmt.Println("Done with all of the requests!!!")
 }
 
 //Creates a reader form the conection
 //Reads new string with ReadString delimited with '\n'.
 //	If there is an error (EOF when client DC) we close the connection and return out of the goroutine
-func handleTCPConn(conn net.Conn) {
+func handleTCPConn(conn net.Conn, conns map[string]net.Conn) {
 	reader := bufio.NewReader(conn)
+	clientConnection := clientTCPConnection{conn: conn, messageCount: 0, authenticated: false}
 	for {
 		message, err := reader.ReadString('\n')
 		if err != nil {
 			conn.Close()
+			delete(conns, conn.RemoteAddr().String())
 			fmt.Println("Client has closed the connection ", conn.RemoteAddr())
 			return
 		}
-		message = "We recieved message " + message + "\n"
-		conn.Write([]byte(message))
+		handleMessage(message, &clientConnection)
 	}
 }
 
-func broadCast(message string, conns []net.Conn) {
+//Refactor to have first message send pkey, the decrypt then have a case to handle different messages
+func handleMessage(message string, clientConnection *clientTCPConnection) {
+	clientConnection.messageCount++
+	//Handle first message
+	if clientConnection.messageCount == 1 {
+		message = message[0 : len(message)-2]
+		base64PublicKey := base64.StdEncoding.EncodeToString(publicKeyPKIX)
+		fmt.Fprintf(clientConnection.conn, "RSAKEY::%s\n", base64PublicKey)
+		return
+	}
+	unEncodedMessage, err := base64.StdEncoding.DecodeString(message)
+	if err != nil {
+		fmt.Println("Error unencoding message ", err)
+		return
+	}
+	unencryptedMessage, err := rsa.DecryptPKCS1v15(cRand.Reader, privateKey, unEncodedMessage)
+	if err != nil {
+		fmt.Println("Error decrypting message ", err)
+		return
+	}
+	fmt.Println(unencryptedMessage)
+	switch {
+	case !clientConnection.authenticated:
+		if string(unencryptedMessage) == "TESTPASS" {
+			clientConnection.authenticated = true
+		}
+		fmt.Println("Authenticated successfully ")
+	case clientConnection.authenticated:
+		switch {
+		case !clientConnection.started:
+			if string(unencryptedMessage) == "starting" {
+				clientConnection.started = true
+			}
+		case clientConnection.started:
+			if string(unencryptedMessage) == "done" {
+				clientConnection.started = false
+				finishChannel <- 1
+			}
+		}
+	default:
+		fmt.Fprintf(clientConnection.conn, "Unauthenticated clients not supported")
+	}
+}
+
+func broadCast(message string, conns map[string]net.Conn) {
 	for _, conn := range conns {
 		fmt.Fprintf(conn, message+"\n")
 	}
+}
+
+func generateRSAInformation() (*rsa.PrivateKey, []byte, error) {
+	privateKey, err := rsa.GenerateKey(cRand.Reader, 2014)
+	if err != nil {
+		return nil, make([]byte, 0), err
+	}
+
+	err = privateKey.Validate()
+	if err != nil {
+		return nil, make([]byte, 0), err
+	}
+
+	publicKeyFromPrivate := privateKey.Public()
+	bytes, err := x509.MarshalPKIXPublicKey(publicKeyFromPrivate)
+	if err != nil {
+		return nil, make([]byte, 0), err
+	}
+	return privateKey, bytes, nil
+}
+
+func decryptMessage(privateKey *rsa.PrivateKey, message []byte) ([]byte, error) {
+	hash := md5.New()
+	var label []byte
+	return rsa.DecryptOAEP(hash, cRand.Reader, privateKey, message, label)
 }
 
 //Runs a non trivial task and returns the time it finished
