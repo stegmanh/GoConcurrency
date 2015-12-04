@@ -10,23 +10,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
+	"hash"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	//"strings"
 	"time"
 )
 
-//Response is a response.. Consider adding an error field of type Error
+//Response struct we will send to the client
 type Response struct {
 	RequestRecievedAt int64
 	ResponseSentAt    int64
 	TimeToProcess     int64
 }
 
-//Uppercase cause lowercause causes issues when trying to unmarshal
+//Struct names are uppercase because lowercase causes issues with unmarshalling
 type config struct {
 	BcryptRuns        int
 	BcryptGoRoutines  int
@@ -38,6 +40,7 @@ type config struct {
 	PrimeGoRoutines   int
 }
 
+//Struct wrapper to keep track of client connections
 type clientTCPConnection struct {
 	conn          net.Conn
 	messageCount  int
@@ -45,15 +48,34 @@ type clientTCPConnection struct {
 	started       bool
 }
 
+//Result struct stores the information recieved back from the clients
+type result struct {
+	Mean  int64
+	Total int64
+	Max   int64
+	Min   int64
+}
+
+//Results is just a struct that contains an [] of result
+type results struct {
+	Results []result
+}
+
+//Crypto globals - get initialized in main function
 var privateKey *rsa.PrivateKey
 var publicKeyPKIX []byte
+var hashInterface hash.Hash
+var blankLabel []byte
 
-//Globals
+//General global
 var goConfig config
-var finishChannel chan int
+var finishChannel chan result
+
+var runResults results
 
 func main() {
 	//Load the config file, panics if something goes wrong
+	//Reads the file, takes the resulting []bytes and unmarshals it into the config struct
 	configFile, err := ioutil.ReadFile("config.json")
 	if err != nil {
 		panic(err)
@@ -64,15 +86,19 @@ func main() {
 	}
 	//End init
 
+	//Inits the crypto information - public/private key
 	privateKey, publicKeyPKIX, err = generateRSAInformation()
 	if err != nil {
 		panic(err)
 	}
 
-	//TCP server
+	//Start tcp server listener in a goroutine
 	go startAndRunTCPServer()
-	//End TCP server func
 
+	//The default HTTP handler
+	//Listens to requests at '/', for each request it takes note of the time recieved
+	//Then it kicks off the set of nonTrivialTasks and stores the time it took in responseSent
+	//Server listening on port 8080
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		requestRecieved := time.Now().UnixNano()
 		responseSent := nonTrivialTast(r)
@@ -89,14 +115,16 @@ func main() {
 //Starts a TCP server listening on port 8000
 //We listen for requests with ln.Accept and when we get one, we handleTCPConn in another goroutine
 func startAndRunTCPServer() {
+	//Map of clients
 	clients := make(map[string]net.Conn)
 	ln, err := net.Listen("tcp", ":8000")
 	if err != nil {
 		fmt.Println(err)
 	}
-	//This function will call an anon function after 30 seconds that broadcasts "start"
-	//Start is the signal to the clients to start the server
-	time.AfterFunc(time.Second*30, func() {
+
+	//Time.after will call a function after some amount of time passes
+	//The function called will make a map of all currently connected clients and broadcast a start message to them
+	time.AfterFunc(time.Second*10, func() {
 		fmt.Printf("Requesting %d clients to start\n", len(clients))
 		currentConns := make(map[string]net.Conn)
 		for k, v := range clients {
@@ -104,6 +132,9 @@ func startAndRunTCPServer() {
 		}
 		handleStartedClients(currentConns)
 	})
+
+	//TCP server listener
+	//Accepts connections and handles each in a seperate goroutine with handleTCPConn
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -115,19 +146,22 @@ func startAndRunTCPServer() {
 	}
 }
 
+//Function to handle clients currently hitting server
+//We init finishChannel and numberOfFinishedClients to block until all clients have finished their requests
 func handleStartedClients(conns map[string]net.Conn) {
-	finishChannel = make(chan int, len(conns))
+	finishChannel = make(chan result, len(conns))
 	broadCast("start\n", conns)
 	var numberOfFinishedClients int
 	for numberOfFinishedClients < len(conns) {
-		numberOfFinishedClients += <-finishChannel
+		runResults.Results = append(runResults.Results, <-finishChannel)
+		numberOfFinishedClients++
 	}
-	fmt.Println("Done with all of the requests!!!")
+	fmt.Printf("Finished all requests with %+v", runResults)
 }
 
 //Creates a reader form the conection
 //Reads new string with ReadString delimited with '\n'.
-//	If there is an error (EOF when client DC) we close the connection and return out of the goroutine
+//If there is an error (EOF when client DC) we close the connection and return out of the goroutine
 func handleTCPConn(conn net.Conn, conns map[string]net.Conn) {
 	reader := bufio.NewReader(conn)
 	clientConnection := clientTCPConnection{conn: conn, messageCount: 0, authenticated: false}
@@ -158,12 +192,11 @@ func handleMessage(message string, clientConnection *clientTCPConnection) {
 		fmt.Println("Error unencoding message ", err)
 		return
 	}
-	unencryptedMessage, err := rsa.DecryptPKCS1v15(cRand.Reader, privateKey, unEncodedMessage)
+	unencryptedMessage, err := rsa.DecryptOAEP(hashInterface, cRand.Reader, privateKey, unEncodedMessage, blankLabel)
 	if err != nil {
 		fmt.Println("Error decrypting message ", err)
 		return
 	}
-	fmt.Println(unencryptedMessage)
 	switch {
 	case !clientConnection.authenticated:
 		if string(unencryptedMessage) == "TESTPASS" {
@@ -177,9 +210,15 @@ func handleMessage(message string, clientConnection *clientTCPConnection) {
 				clientConnection.started = true
 			}
 		case clientConnection.started:
-			if string(unencryptedMessage) == "done" {
+			if strings.HasPrefix(string(unencryptedMessage), "done") {
+				unencryptedMessage = []byte(strings.TrimPrefix(string(unencryptedMessage), "done:"))
+				var runResult result
+				err := json.Unmarshal(unencryptedMessage, &runResult)
+				if err != nil {
+					fmt.Println("ERROR ERROR ERROR!!!", err)
+				}
 				clientConnection.started = false
-				finishChannel <- 1
+				finishChannel <- runResult
 			}
 		}
 	default:
@@ -194,6 +233,7 @@ func broadCast(message string, conns map[string]net.Conn) {
 }
 
 func generateRSAInformation() (*rsa.PrivateKey, []byte, error) {
+	hashInterface = md5.New()
 	privateKey, err := rsa.GenerateKey(cRand.Reader, 2014)
 	if err != nil {
 		return nil, make([]byte, 0), err
@@ -210,12 +250,6 @@ func generateRSAInformation() (*rsa.PrivateKey, []byte, error) {
 		return nil, make([]byte, 0), err
 	}
 	return privateKey, bytes, nil
-}
-
-func decryptMessage(privateKey *rsa.PrivateKey, message []byte) ([]byte, error) {
-	hash := md5.New()
-	var label []byte
-	return rsa.DecryptOAEP(hash, cRand.Reader, privateKey, message, label)
 }
 
 //Runs a non trivial task and returns the time it finished
