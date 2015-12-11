@@ -156,7 +156,7 @@ func handleStartedClients(conns map[string]net.Conn) {
 		runResults.Results = append(runResults.Results, <-finishChannel)
 		numberOfFinishedClients++
 	}
-	fmt.Printf("Finished all requests with %+v", runResults)
+	fmt.Printf("Finished all requests with %+v", runResults.summarize())
 }
 
 //Creates a reader form the conection
@@ -250,6 +250,17 @@ func generateRSAInformation() (*rsa.PrivateKey, []byte, error) {
 		return nil, make([]byte, 0), err
 	}
 	return privateKey, bytes, nil
+}
+
+func (r results) summarize() result {
+	summary := result{Mean: 0, Max: -1, Min: 1<<63 - 1}
+	for _, res := range r.Results {
+		summary.Max = max(res.Max, summary.Max)
+		summary.Min = min(res.Min, summary.Min)
+		summary.Total += res.Total
+	}
+
+	return summary
 }
 
 //Runs a non trivial task and returns the time it finished
@@ -365,4 +376,18 @@ func isPrime(num int, back chan bool) {
 	}
 	back <- true
 	return
+}
+
+func min(a int64, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a int64, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
